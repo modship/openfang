@@ -28,7 +28,7 @@ pub struct TelegramAdapter {
     /// SECURITY: Bot token is zeroized on drop to prevent memory disclosure.
     token: Zeroizing<String>,
     client: reqwest::Client,
-    allowed_users: Vec<i64>,
+    allowed_users: Vec<String>,
     poll_interval: Duration,
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -39,7 +39,7 @@ impl TelegramAdapter {
     ///
     /// `token` is the raw bot token (read from env by the caller).
     /// `allowed_users` is the list of Telegram user IDs allowed to interact (empty = allow all).
-    pub fn new(token: String, allowed_users: Vec<i64>, poll_interval: Duration) -> Self {
+    pub fn new(token: String, allowed_users: Vec<String>, poll_interval: Duration) -> Self {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         Self {
             token: Zeroizing::new(token),
@@ -451,7 +451,7 @@ impl ChannelAdapter for TelegramAdapter {
 /// Handles both `message` and `edited_message` update types.
 fn parse_telegram_update(
     update: &serde_json::Value,
-    allowed_users: &[i64],
+    allowed_users: &[String],
 ) -> Option<ChannelMessage> {
     let message = update
         .get("message")
@@ -460,7 +460,8 @@ fn parse_telegram_update(
     let user_id = from["id"].as_i64()?;
 
     // Security: check allowed_users
-    if !allowed_users.is_empty() && !allowed_users.contains(&user_id) {
+    let user_id_str = user_id.to_string();
+    if !allowed_users.is_empty() && !allowed_users.iter().any(|u| u == &user_id_str) {
         debug!("Telegram: ignoring message from unlisted user {user_id}");
         return None;
     }
@@ -679,11 +680,11 @@ mod tests {
         assert!(msg.is_some());
 
         // Non-matching allowed_users = filter out
-        let msg = parse_telegram_update(&update, &[111, 222]);
+        let msg = parse_telegram_update(&update, &["111".to_string(), "222".to_string()]);
         assert!(msg.is_none());
 
         // Matching allowed_users = allow
-        let msg = parse_telegram_update(&update, &[999]);
+        let msg = parse_telegram_update(&update, &["999".to_string()]);
         assert!(msg.is_some());
     }
 

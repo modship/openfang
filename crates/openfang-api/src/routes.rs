@@ -6947,11 +6947,7 @@ fn upsert_channel_config(
                     .split(',')
                     .map(|s| s.trim())
                     .filter(|s| !s.is_empty())
-                    .map(|s| {
-                        s.parse::<i64>()
-                            .map(toml::Value::Integer)
-                            .unwrap_or_else(|_| toml::Value::String(s.to_string()))
-                    })
+                    .map(|s| toml::Value::String(s.to_string()))
                     .collect();
                 toml::Value::Array(items)
             }
