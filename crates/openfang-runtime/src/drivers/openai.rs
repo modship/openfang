@@ -63,6 +63,9 @@ struct OaiRequest {
     /// Moonshot Kimi K2.5: disable thinking so multi-turn with tool_calls works without preserving reasoning_content.
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<serde_json::Value>,
+    /// Request usage stats in streaming responses (OpenAI extension, supported by Groq et al).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<serde_json::Value>,
 }
 
 /// Returns true if a model uses `max_completion_tokens` instead of `max_tokens`.
@@ -81,9 +84,7 @@ fn uses_completion_tokens(model: &str) -> bool {
 /// temperature and return 400 if it is included.
 fn rejects_temperature(model: &str) -> bool {
     let m = model.to_lowercase();
-    m.starts_with("o1")
-        || m.starts_with("o3")
-        || m.starts_with("o4")
+    m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4")
 }
 
 /// Returns true if a model only accepts temperature = 1 (e.g. Moonshot Kimi K2/K2.5).
@@ -243,9 +244,11 @@ impl LlmDriver for OpenAIDriver {
                                 has_tool_results = true;
                                 oai_messages.push(OaiMessage {
                                     role: "tool".to_string(),
-                                    content: Some(OaiMessageContent::Text(
-                                        if content.is_empty() { "(empty)".to_string() } else { content.clone() }
-                                    )),
+                                    content: Some(OaiMessageContent::Text(if content.is_empty() {
+                                        "(empty)".to_string()
+                                    } else {
+                                        content.clone()
+                                    })),
                                     tool_calls: None,
                                     tool_call_id: Some(tool_use_id.clone()),
                                     reasoning_content: None,
@@ -309,7 +312,9 @@ impl LlmDriver for OpenAIDriver {
                             Some(tool_calls)
                         },
                         tool_call_id: None,
-                        reasoning_content: if has_tool_calls && self.kimi_needs_reasoning_content(&request.model) {
+                        reasoning_content: if has_tool_calls
+                            && self.kimi_needs_reasoning_content(&request.model)
+                        {
                             Some(String::new())
                         } else {
                             None
@@ -365,6 +370,7 @@ impl LlmDriver for OpenAIDriver {
             tools: oai_tools,
             tool_choice,
             stream: false,
+            stream_options: None,
             thinking: if self.kimi_needs_reasoning_content(&request.model) {
                 Some(serde_json::json!({"type": "disabled"}))
             } else {
@@ -457,9 +463,16 @@ impl LlmDriver for OpenAIDriver {
 
                 // Auto-cap max_tokens when model rejects our value (e.g. Groq Maverick limit 8192)
                 if status == 400 && body.contains("max_tokens") && attempt < max_retries {
-                    let current = oai_request.max_tokens.or(oai_request.max_completion_tokens).unwrap_or(4096);
+                    let current = oai_request
+                        .max_tokens
+                        .or(oai_request.max_completion_tokens)
+                        .unwrap_or(4096);
                     let cap = extract_max_tokens_limit(&body).unwrap_or(current / 2);
-                    warn!(old = current, new = cap, "Auto-capping max_tokens to model limit");
+                    warn!(
+                        old = current,
+                        new = cap,
+                        "Auto-capping max_tokens to model limit"
+                    );
                     if oai_request.max_completion_tokens.is_some() {
                         oai_request.max_completion_tokens = Some(cap);
                     } else {
@@ -629,9 +642,11 @@ impl LlmDriver for OpenAIDriver {
                         {
                             oai_messages.push(OaiMessage {
                                 role: "tool".to_string(),
-                                content: Some(OaiMessageContent::Text(
-                                    if content.is_empty() { "(empty)".to_string() } else { content.clone() }
-                                )),
+                                content: Some(OaiMessageContent::Text(if content.is_empty() {
+                                    "(empty)".to_string()
+                                } else {
+                                    content.clone()
+                                })),
                                 tool_calls: None,
                                 tool_call_id: Some(tool_use_id.clone()),
                                 reasoning_content: None,
@@ -673,7 +688,9 @@ impl LlmDriver for OpenAIDriver {
                             Some(tool_calls_out)
                         },
                         tool_call_id: None,
-                        reasoning_content: if has_tool_calls && self.kimi_needs_reasoning_content(&request.model) {
+                        reasoning_content: if has_tool_calls
+                            && self.kimi_needs_reasoning_content(&request.model)
+                        {
                             Some(String::new())
                         } else {
                             None
@@ -728,6 +745,7 @@ impl LlmDriver for OpenAIDriver {
             tools: oai_tools,
             tool_choice,
             stream: true,
+            stream_options: Some(serde_json::json!({"include_usage": true})),
             thinking: if self.kimi_needs_reasoning_content(&request.model) {
                 Some(serde_json::json!({"type": "disabled"}))
             } else {
@@ -822,7 +840,10 @@ impl LlmDriver for OpenAIDriver {
 
                 // Auto-cap max_tokens when model rejects our value
                 if status == 400 && body.contains("max_tokens") && attempt < max_retries {
-                    let current = oai_request.max_tokens.or(oai_request.max_completion_tokens).unwrap_or(4096);
+                    let current = oai_request
+                        .max_tokens
+                        .or(oai_request.max_completion_tokens)
+                        .unwrap_or(4096);
                     let cap = extract_max_tokens_limit(&body).unwrap_or(current / 2);
                     warn!(old = current, new = cap, "Auto-capping max_tokens (stream)");
                     if oai_request.max_completion_tokens.is_some() {
@@ -830,6 +851,19 @@ impl LlmDriver for OpenAIDriver {
                     } else {
                         oai_request.max_tokens = Some(cap);
                     }
+                    continue;
+                }
+
+                // Provider doesn't support stream_options — retry without it
+                if status == 400
+                    && oai_request.stream_options.is_some()
+                    && attempt < max_retries
+                    && (body.contains("stream_options")
+                        || body.contains("stream_option")
+                        || body.contains("Unrecognized request argument"))
+                {
+                    warn!(model = %oai_request.model, "Stripping stream_options (unsupported by provider)");
+                    oai_request.stream_options = None;
                     continue;
                 }
 
@@ -867,10 +901,13 @@ impl LlmDriver for OpenAIDriver {
             let mut tool_accum: Vec<(String, String, String)> = Vec::new();
             let mut finish_reason: Option<String> = None;
             let mut usage = TokenUsage::default();
+            let mut chunk_count: u32 = 0;
+            let mut sse_line_count: u32 = 0;
 
             let mut byte_stream = resp.bytes_stream();
             while let Some(chunk_result) = byte_stream.next().await {
                 let chunk = chunk_result.map_err(|e| LlmError::Http(e.to_string()))?;
+                chunk_count += 1;
                 buffer.push_str(&String::from_utf8_lossy(&chunk));
 
                 // Process complete lines
@@ -882,6 +919,7 @@ impl LlmDriver for OpenAIDriver {
                         continue;
                     }
 
+                    sse_line_count += 1;
                     let data = match line.strip_prefix("data:") {
                         Some(d) => d.trim_start(),
                         None => continue,
@@ -975,6 +1013,19 @@ impl LlmDriver for OpenAIDriver {
                     }
                 }
             }
+
+            // Log stream summary for diagnostics
+            debug!(
+                chunks = chunk_count,
+                sse_lines = sse_line_count,
+                text_len = text_content.len(),
+                tool_count = tool_accum.len(),
+                finish = ?finish_reason,
+                input_tokens = usage.input_tokens,
+                output_tokens = usage.output_tokens,
+                buffer_remaining = buffer.len(),
+                "SSE stream completed"
+            );
 
             // Build the final response
             let mut content = Vec::new();
